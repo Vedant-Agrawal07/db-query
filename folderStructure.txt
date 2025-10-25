@@ -1,0 +1,44 @@
+backend/
+│
+├── package.json
+├── server.js                      # Entry point (starts Express app)
+│
+├── src/
+│   ├── config/
+│   │   ├── env.js                 # Loads .env variables (database URLs, API keys)
+│   │   ├── logger.js              # Optional: Winston or custom logger
+│   │   └── db/
+│   │       ├── mongoConfig.js     # MongoDB (vanilla or Mongoose) connection
+│   │       ├── postgresConfig.js  # PostgreSQL (pg or Prisma) connection
+│   │       ├── mysqlConfig.js     # MySQL (mysql2 or Prisma) connection
+│   │       └── index.js           # Chooses which config to load based on user selection
+│
+│   ├── routes/
+│   │   ├── index.js               # Central route file (imports below)
+│   │   ├── dbRoutes.js            # Routes for connecting DBs, testing connection, etc.
+│   │   └── aiRoutes.js            # Routes that handle AI requests (Gemini API)
+│
+│   ├── controllers/
+│   │   ├── dbController.js        # Logic for reading tables, fetching metadata
+│   │   └── aiController.js        # Logic for handling AI prompt & response flow
+│
+│   ├── services/
+│   │   ├── mongoService.js        # DB read/write utility functions for MongoDB
+│   │   ├── postgresService.js     # DB read/write utility functions for PostgreSQL
+│   │   ├── mysqlService.js        # DB read/write utility functions for MySQL
+│   │   └── index.js               # Detects DB type and routes to correct service
+│
+│   ├── utils/
+│   │   ├── errorHandler.js        # Custom error middleware
+│   │   ├── responseFormatter.js   # Format success/error responses
+│   │   └── codeRunner.js          # Optional — sandboxed runner for safe code tests (future)
+│
+│   ├── middlewares/
+│   │   ├── validateDBConnection.js # Checks if DB connection is valid
+│   │   └── catchAsync.js          # Async error wrapper for controllers
+│
+│   └── ai/
+│       ├── geminiClient.js        # Config + helper to talk to Gemini API
+│       └── promptTemplates.js     # Prewritten prompts for schema, queries, etc.
+│
+└── .env                           # DB URLs, API keys, etc.
