@@ -102,5 +102,15 @@ const scanDb = async (pool) => {
      databases: databases,
    };
 };
+const scanTables = async (pool ) => {
+  const [tables] = await pool.query("SHOW TABLES");
+   return {
+     status: true,
+     message: `connection successful`,
+     tables: tables.length > 0 ? tables : [],
+   };
+};
 
-export { initalConnect, dbPool, fetchTableData , scanDb };
+
+
+export { initalConnect, dbPool, fetchTableData, scanDb, scanTables };
