@@ -16,10 +16,18 @@ import {
   scanCollections,
 } from "../db/mongoDbConnector.js";
 
+import {
+  initialConnectPostgres,
+  dbPoolPostgres,
+  fetchTableDataPostgres,
+  scanDbPostgres,
+  scanTablesPostgres,
+} from "../db/postgresConnector.js";
+
 import crypto from "crypto";
 
 const handshake = expressAsyncHandler(async (req, res) => {
-  const { host, user, password, uri } = req.body;
+  let { host, user, password, uri } = req.body;
   // "uri" will be empty for db mySql and postgres
   const { db } = req.params;
   if (db === "mongoDb") {
@@ -32,7 +40,26 @@ const handshake = expressAsyncHandler(async (req, res) => {
     }
   } else if (db === "mySql") {
     try {
-      res.status(201).json(await initalConnect(host, user, password));
+      // this all convertng to uri will be handeled in frontend
+      // assuming port to be 3306
+      // const connectUri = database
+      //   ? `mysql://${user}:${password}@${host}:${3306}/${database}`
+      //   : `mysql://${user}:${password}@${host}:${3306}`;
+      const connectUri = uri;
+      // res.status(201).json(await initalConnect(host, user, password));
+      res.status(201).json(await initalConnect(connectUri));
+      return;
+    } catch (error) {
+      res.status(400).json({ message: "error occured", issue: error });
+      return;
+    }
+  } else {
+    try {
+      uri = uri.replace("&channel_binding=require", "");
+
+      const connectUri = uri;
+      // res.status(201).json(await initialConnectPostgres(host, user, password));
+      res.status(201).json(await initialConnectPostgres(connectUri));
       return;
     } catch (error) {
       res.status(400).json({ message: "error occured", issue: error });
@@ -58,6 +85,21 @@ const connectDb = expressAsyncHandler(async (req, res) => {
   } else if (db === "mySql") {
     try {
       const { pool, tables } = await dbPool(host, user, password, database);
+      const poolId = crypto.randomUUID();
+      userPool.set(poolId, pool);
+      // console.log(pool);
+      res.status(201).json({ threadId: poolId, tables: tables });
+    } catch (error) {
+      res.status(400).json({ message: "error occured", issue: error });
+    }
+  } else {
+    try {
+      const { pool, tables } = await dbPoolPostgres(
+        host,
+        user,
+        password,
+        database
+      );
       const poolId = crypto.randomUUID();
       userPool.set(poolId, pool);
       // console.log(pool);
@@ -93,6 +135,17 @@ const tableInfo = expressAsyncHandler(async (req, res) => {
     } catch (error) {
       res.status(400).json({ message: "error occured", issue: error });
     }
+  } else {
+    const pool = userPool.get(threadId);
+    const { rows, columns } = await fetchTableDataPostgres(tableName, pool);
+    try {
+      res.status(201).json({
+        rowData: rows,
+        columnData: columns,
+      });
+    } catch (error) {
+      res.status(400).json({ message: "error occured", issue: error });
+    }
   }
 });
 
@@ -115,6 +168,14 @@ const databaseScan = expressAsyncHandler(async (req, res) => {
     } catch (error) {
       res.status(400).json({ message: "error occured", issue: error });
     }
+  } else {
+    const pool = userPool.get(threadId);
+    // const {databases} = await scanDb(pool);
+    try {
+      res.status(201).json(await scanDbPostgres(pool));
+    } catch (error) {
+      res.status(400).json({ message: "error occured", issue: error });
+    }
   }
 });
 const tableScan = expressAsyncHandler(async (req, res) => {
@@ -133,6 +194,14 @@ const tableScan = expressAsyncHandler(async (req, res) => {
     // const {databases} = await scanDb(pool);
     try {
       res.status(201).json(await scanCollections(client));
+    } catch (error) {
+      res.status(400).json({ message: "error occured", issue: error });
+    }
+  } else {
+    const pool = userPool.get(threadId);
+    // const {databases} = await scanDb(pool);
+    try {
+      res.status(201).json(await scanTablesPostgres(pool));
     } catch (error) {
       res.status(400).json({ message: "error occured", issue: error });
     }
