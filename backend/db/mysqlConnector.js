@@ -105,27 +105,26 @@ const initalConnect = async (uri) => {
   }
 };
 
-const dbPool = async (host, user, password, database) => {
+const dbPool = async (connectionString) => {
   const pool = mysql.createPool({
-    host: host,
-    user: user,
-    password: password,
-    database: database,
+    uri: connectionString,
     waitForConnections: true,
     connectionLimit: 10,
     queueLimit: 0,
+    ssl: {
+      rejectUnauthorized: false,
+    },
   });
   try {
-    const [tables] = await pool.query("SHOW TABLES");
+    const [rows] = await pool.query("SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE()");
+    const tablesList = rows.map(r => ({ table_name: r.table_name || r.TABLE_NAME || "" }));
 
     return {
       status: true,
-      message: `connection successful to database ${database}`,
-      tables: tables.length > 0 ? tables : [],
+      message: "Connection successful",
+      tables: tablesList,
       pool: pool,
     };
-
-    // return { tables, pool };
   } catch (err) {
     await pool.end();
 
@@ -152,13 +151,23 @@ const scanDb = async (pool) => {
     databases: databases,
   };
 };
+
 const scanTables = async (pool) => {
-  const [tables] = await pool.query("SHOW TABLES");
-  return {
-    status: true,
-    message: `connection successful`,
-    tables: tables.length > 0 ? tables : [],
-  };
+  try {
+    const [rows] = await pool.query("SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE()");
+    const tablesList = rows.map(r => ({ table_name: r.table_name || r.TABLE_NAME || "" }));
+    return {
+      status: true,
+      message: `connection successful`,
+      tables: tablesList,
+    };
+  } catch (err) {
+    return {
+      status: false,
+      message: "Failed to fetch tables",
+      error: err.message
+    };
+  }
 };
 
 export { initalConnect, dbPool, fetchTableData, scanDb, scanTables };

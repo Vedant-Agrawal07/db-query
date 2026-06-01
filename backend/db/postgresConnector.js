@@ -58,13 +58,10 @@ const initialConnectPostgres = async (uri) => {
   }
 };
 
-const dbPoolPostgres = async (host, user, password, database) => {
+const dbPoolPostgres = async (connectionString) => {
   const pool = new Pool({
-    user: user,
-    host: host,
-    password: password,
-    // port: 5432,   // to be decieded to add or not
-    database: database,
+    connectionString,
+    ssl: { rejectUnauthorized: false },
     max: 10, // Maximum number of clients in the pool
   });
   try {
@@ -77,18 +74,18 @@ const dbPoolPostgres = async (host, user, password, database) => {
 
     return {
       status: true,
-      message: `connection successful to database ${database}`,
+      message: "Connection successful",
       tables: rows.length > 0 ? rows : [],
       pool: pool,
     };
   } catch (error) {
     await pool.end();
 
-    console.log(err);
+    console.log(error);
     return {
       status: false,
       message: "Failed to fetch tables",
-      error: err.message,
+      error: error.message,
     };
   }
 };

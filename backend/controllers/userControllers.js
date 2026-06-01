@@ -27,85 +27,98 @@ import {
 import crypto from "crypto";
 
 const handshake = expressAsyncHandler(async (req, res) => {
-  let { host, user, password, uri } = req.body;
-  // "uri" will be empty for db mySql and postgres
-  const { db } = req.params;
-  if (db === "mongoDb") {
+  const { dbType, connectionString } = req.body;
+  const db = dbType || req.params.db;
+
+  const validDbTypes = new Set(["mysql", "postgres", "postgresql", "mongodb", "mySql", "mongoDb"]);
+  if (!db || !validDbTypes.has(db)) {
+    res.status(400).json({ message: "Invalid database type. Must be mysql, postgres, or mongodb." });
+    return;
+  }
+  if (!connectionString || typeof connectionString !== "string" || connectionString.trim() === "") {
+    res.status(400).json({ message: "connectionString is required and must be a non-empty string." });
+    return;
+  }
+
+  // Normalize db type
+  let normalizedDb = db.toLowerCase();
+  if (normalizedDb === "postgresql") normalizedDb = "postgres";
+  if (normalizedDb === "mysql") normalizedDb = "mySql";
+  if (normalizedDb === "mongodb") normalizedDb = "mongoDb";
+
+  if (normalizedDb === "mongoDb") {
     try {
-      res.status(201).json(await initalConnectMongo(uri));
+      res.status(201).json(await initalConnectMongo(connectionString));
       return;
     } catch (error) {
-      res.status(400).json({ message: "error occured", issue: error });
+      res.status(400).json({ message: "Connection handshake failed", issue: error });
       return;
     }
-  } else if (db === "mySql") {
+  } else if (normalizedDb === "mySql") {
     try {
-      // this all convertng to uri will be handeled in frontend
-      // assuming port to be 3306
-      // const connectUri = database
-      //   ? `mysql://${user}:${password}@${host}:${3306}/${database}`
-      //   : `mysql://${user}:${password}@${host}:${3306}`;
-      const connectUri = uri;
-      // res.status(201).json(await initalConnect(host, user, password));
-      res.status(201).json(await initalConnect(connectUri));
+      res.status(201).json(await initalConnect(connectionString));
       return;
     } catch (error) {
-      res.status(400).json({ message: "error occured", issue: error });
+      res.status(400).json({ message: "Connection handshake failed", issue: error });
       return;
     }
   } else {
     try {
-      uri = uri.replace("&channel_binding=require", "");
-
-      const connectUri = uri;
-      // res.status(201).json(await initialConnectPostgres(host, user, password));
-      res.status(201).json(await initialConnectPostgres(connectUri));
+      res.status(201).json(await initialConnectPostgres(connectionString));
       return;
     } catch (error) {
-      res.status(400).json({ message: "error occured", issue: error });
+      res.status(400).json({ message: "Connection handshake failed", issue: error });
       return;
     }
   }
 });
 
 const connectDb = expressAsyncHandler(async (req, res) => {
-  const { host, user, password, database, uri } = req.body;
-  const { db } = req.params;
-  if (db === "mongoDb") {
-    // here uri , database will be used
+  const { dbType, connectionString } = req.body;
+  const db = dbType || req.params.db;
+
+  const validDbTypes = new Set(["mysql", "postgres", "postgresql", "mongodb", "mySql", "mongoDb"]);
+  if (!db || !validDbTypes.has(db)) {
+    res.status(400).json({ message: "Invalid database type. Must be mysql, postgres, or mongodb." });
+    return;
+  }
+  if (!connectionString || typeof connectionString !== "string" || connectionString.trim() === "") {
+    res.status(400).json({ message: "connectionString is required and must be a non-empty string." });
+    return;
+  }
+
+  // Normalize db type
+  let normalizedDb = db.toLowerCase();
+  if (normalizedDb === "postgresql") normalizedDb = "postgres";
+  if (normalizedDb === "mysql") normalizedDb = "mySql";
+  if (normalizedDb === "mongodb") normalizedDb = "mongoDb";
+
+  if (normalizedDb === "mongoDb") {
     try {
-      const { client, collections } = await dbPoolMongo(uri, database);
+      const { client, collections } = await dbPoolMongo(connectionString);
       const clientId = crypto.randomUUID();
       userPool.set(clientId, client);
-      console.log(client);
       res.status(201).json({ threadId: clientId, tables: collections });
     } catch (error) {
-      res.status(400).json({ message: "error occured", issue: error });
+      res.status(400).json({ message: "Database connection failed", issue: error });
     }
-  } else if (db === "mySql") {
+  } else if (normalizedDb === "mySql") {
     try {
-      const { pool, tables } = await dbPool(host, user, password, database);
+      const { pool, tables } = await dbPool(connectionString);
       const poolId = crypto.randomUUID();
       userPool.set(poolId, pool);
-      // console.log(pool);
       res.status(201).json({ threadId: poolId, tables: tables });
     } catch (error) {
-      res.status(400).json({ message: "error occured", issue: error });
+      res.status(400).json({ message: "Database connection failed", issue: error });
     }
   } else {
     try {
-      const { pool, tables } = await dbPoolPostgres(
-        host,
-        user,
-        password,
-        database
-      );
+      const { pool, tables } = await dbPoolPostgres(connectionString);
       const poolId = crypto.randomUUID();
       userPool.set(poolId, pool);
-      // console.log(pool);
       res.status(201).json({ threadId: poolId, tables: tables });
     } catch (error) {
-      res.status(400).json({ message: "error occured", issue: error });
+      res.status(400).json({ message: "Database connection failed", issue: error });
     }
   }
 });

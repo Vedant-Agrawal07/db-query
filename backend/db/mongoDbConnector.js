@@ -26,16 +26,16 @@ const initalConnectMongo = async (uri) => {
 };
 
 // Connect to a specific database and get collections
-const dbPoolMongo = async (uri, dbName) => {
-  const client = new MongoClient(uri, { useUnifiedTopology: true });
+const dbPoolMongo = async (connectionString) => {
+  const client = new MongoClient(connectionString, { useUnifiedTopology: true });
   try {
     await client.connect();
-    const db = client.db(dbName);
+    const db = client.db(); // Uses the database name specified in the connection string
     const collections = await db.listCollections().toArray();
 
     return {
       status: true,
-      message: `Connection successful to database ${dbName}`,
+      message: "Connection successful",
       collections: collections.length > 0 ? collections : [],
       client: db, // keep client to reuse for queries
     };
@@ -44,7 +44,7 @@ const dbPoolMongo = async (uri, dbName) => {
     console.log(err);
     return {
       status: false,
-      message: `Failed to fetch collections for ${dbName}`,
+      message: "Failed to fetch collections",
       error: err.message,
     };
   }
