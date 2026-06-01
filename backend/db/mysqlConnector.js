@@ -138,7 +138,7 @@ const dbPool = async (connectionString) => {
 };
 
 const fetchTableData = async (tableName, pool) => {
-  const [rows] = await pool.query(`SELECT * FROM \`${tableName}\``);
+  const [rows] = await pool.query(`SELECT * FROM \`${tableName}\` LIMIT 100`);
   const [columns] = await pool.query(`DESC \`${tableName}\``);
   return { rows: rows, columns: columns };
 };

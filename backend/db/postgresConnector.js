@@ -91,7 +91,7 @@ const dbPoolPostgres = async (connectionString) => {
 };
 
 const fetchTableDataPostgres = async (tableName, pool) => {
-  const tableData = await pool.query(`SELECT * FROM "${tableName}";`);
+  const tableData = await pool.query(`SELECT * FROM "${tableName}" LIMIT 100;`);
   const fieldNames = tableData.fields.map((field) => field.name);
   return { rows: tableData.rows, columns: fieldNames };
 };

@@ -71,6 +71,18 @@ const highlightQuery = (query, dbType) => {
   return highlightedParts.join("");
 };
 
+// Helper to safely extract column names from diverse formats (MySQL DESC object list vs Postgres/Mongo string array)
+const getColumnNames = (columns) => {
+  if (!columns || !Array.isArray(columns)) return [];
+  return columns.map(col => {
+    if (typeof col === "string") return col;
+    if (col && typeof col === "object") {
+      return col.Field || col.field || col.Column || col.column || "";
+    }
+    return String(col);
+  }).filter(name => name !== "");
+};
+
 function App() {
   // Connection State
   const [isConnected, setIsConnected] = useState(false);
@@ -80,6 +92,13 @@ function App() {
   // Connection Inputs
   const [connectionString, setConnectionString] = useState("");
   const [database, setDatabase] = useState("");
+
+  // Table Data Explorer State
+  const [selectedExplorerTable, setSelectedExplorerTable] = useState("");
+  const [explorerTableData, setExplorerTableData] = useState({}); // cached data: { [tableName]: { rowData, columnData } }
+  const [loadingExplorerData, setLoadingExplorerData] = useState(false);
+  const [explorerError, setExplorerError] = useState("");
+  const [bottomTab, setBottomTab] = useState("explorer"); // 'results' | 'explorer'
 
   // Helper to extract database name from URI for visual display
   const getDbNameFromUri = (uriStr) => {
@@ -150,7 +169,46 @@ function App() {
     }
   }, []);
 
-  const fetchSchema = async (activeThreadId, activeDbType) => {
+  const fetchTableExplorerData = async (tableName, activeThreadId = threadId, activeDbType = dbType, forceRefresh = false) => {
+    if (!tableName) return;
+    setExplorerError("");
+
+    // If it's already cached and not a forced refresh, just select it and switch tab
+    if (explorerTableData[tableName] && !forceRefresh) {
+      setSelectedExplorerTable(tableName);
+      setBottomTab("explorer");
+      return;
+    }
+
+    setLoadingExplorerData(true);
+    try {
+      const response = await fetch(`/api/user/tableInfo/${activeDbType}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ threadId: activeThreadId, tableName })
+      });
+      const data = await response.json();
+      if (response.ok) {
+        setExplorerTableData(prev => ({
+          ...prev,
+          [tableName]: {
+            rowData: data.rowData || [],
+            columnData: data.columnData || []
+          }
+        }));
+        setSelectedExplorerTable(tableName);
+        setBottomTab("explorer");
+      } else {
+        setExplorerError(data.message || "Failed to load table data.");
+      }
+    } catch (err) {
+      setExplorerError(err.message || "Communication error loading table data.");
+    } finally {
+      setLoadingExplorerData(false);
+    }
+  };
+
+  const fetchSchema = async (activeThreadId, activeDbType, autoLoadTable = "") => {
     setLoadingSchema(true);
     try {
       const response = await fetch(`/api/user/schema/${activeDbType}`, {
@@ -163,7 +221,15 @@ function App() {
         setSchema(data.schema);
         // Expand first table by default
         if (data.schema.length > 0) {
-          setExpandedTables({ [data.schema[0].table]: true });
+          const firstTable = data.schema[0].table;
+          setExpandedTables(prev => ({
+            ...prev,
+            [firstTable]: true
+          }));
+          
+          const tableToLoad = autoLoadTable || firstTable;
+          // Trigger data loading for the selected explorer table
+          fetchTableExplorerData(tableToLoad, activeThreadId, activeDbType, !!autoLoadTable);
         }
       } else {
         console.error("Failed to load schema:", data.message);
@@ -199,6 +265,12 @@ function App() {
       const dbName = getDbNameFromUri(connectionString);
       setDatabase(dbName);
       
+      // Clear explorer states
+      setSelectedExplorerTable("");
+      setExplorerTableData({});
+      setExplorerError("");
+      setBottomTab("explorer");
+      
       // Persist connection
       localStorage.setItem("querygenius_thread_id", activeThreadId);
       localStorage.setItem("querygenius_db_type", dbType);
@@ -222,6 +294,12 @@ function App() {
     setConnectionString("");
     setDatabase("");
     
+    // Clear explorer states
+    setSelectedExplorerTable("");
+    setExplorerTableData({});
+    setExplorerError("");
+    setBottomTab("explorer");
+    
     localStorage.removeItem("querygenius_thread_id");
     localStorage.removeItem("querygenius_db_type");
     localStorage.removeItem("querygenius_db_name");
@@ -234,6 +312,7 @@ function App() {
 
     setGenerating(true);
     setQuestion("");
+    setBottomTab("results");
 
     // Add query to local history immediately as loading
     const tempIndex = chatHistory.length;
@@ -306,6 +385,13 @@ function App() {
     }));
   };
 
+  const handleRefresh = async () => {
+    // Clear cached previews
+    setExplorerTableData({});
+    // Fetch schema and reload currently selected explorer table (or first table if none selected)
+    await fetchSchema(threadId, dbType, selectedExplorerTable);
+  };
+
   // Get active chat details
   const activeChat = selectedChatIndex >= 0 ? chatHistory[selectedChatIndex] : null;
 
@@ -319,19 +405,28 @@ function App() {
     : 0;
 
   const exportToCSV = () => {
-    if (!activeChat) return;
-
     let headers = [];
     let rows = [];
+    let filename = "export";
 
-    if (activeChat.preview) {
-      headers = activeChat.preview.columns || [];
-      rows = activeChat.preview.rows || [];
-    } else if (activeChat.results && activeChat.results.length > 0) {
-      headers = Object.keys(activeChat.results[0]);
-      rows = activeChat.results.map(row => headers.map(header => row[header]));
+    if (bottomTab === "explorer") {
+      if (!selectedExplorerTable || !explorerTableData[selectedExplorerTable]) return;
+      const data = explorerTableData[selectedExplorerTable];
+      headers = getColumnNames(data.columnData);
+      rows = data.rowData.map(row => headers.map(header => row[header]));
+      filename = `table_${selectedExplorerTable}`;
     } else {
-      return;
+      if (!activeChat) return;
+      if (activeChat.preview) {
+        headers = activeChat.preview.columns || [];
+        rows = activeChat.preview.rows || [];
+      } else if (activeChat.results && activeChat.results.length > 0) {
+        headers = Object.keys(activeChat.results[0]);
+        rows = activeChat.results.map(row => headers.map(header => row[header]));
+      } else {
+        return;
+      }
+      filename = `${activeChat.preview ? "query_preview" : "query_results"}_${selectedChatIndex + 1}`;
     }
 
     const csvContent = [
@@ -349,7 +444,7 @@ function App() {
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.setAttribute("href", url);
-    link.setAttribute("download", `${activeChat.preview ? "query_preview" : "query_results"}_${selectedChatIndex + 1}.csv`);
+    link.setAttribute("download", `${filename}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -496,12 +591,12 @@ function App() {
               <div className="p-4 border-b border-white/5 flex items-center justify-between">
                 <span className="text-xs font-bold uppercase tracking-wider text-slate-400">Schema Explorer</span>
                 <button
-                  onClick={() => fetchSchema(threadId, dbType)}
-                  disabled={loadingSchema}
-                  className="p-1 hover:bg-white/5 rounded text-slate-400 hover:text-white transition-all"
-                  title="Reload Schema"
+                  onClick={handleRefresh}
+                  disabled={loadingSchema || loadingExplorerData}
+                  className="p-1 hover:bg-white/5 rounded text-slate-400 hover:text-white transition-all cursor-pointer"
+                  title="Reload Schema and Table Data"
                 >
-                  <svg xmlns="http://www.w3.org/2000/svg" className={`h-4 w-4 ${loadingSchema ? "animate-spin text-indigo-400" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <svg xmlns="http://www.w3.org/2000/svg" className={`h-4 w-4 ${loadingSchema || loadingExplorerData ? "animate-spin text-indigo-400" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.21 7.89H17.64" />
                   </svg>
                 </button>
@@ -522,8 +617,15 @@ function App() {
                       <div key={tableObj.table} className="border border-white/0 hover:border-white/5 rounded-lg overflow-hidden transition-all bg-[#0f1424]/30">
                         {/* Table Header */}
                         <button
-                          onClick={() => toggleTableExpand(tableObj.table)}
-                          className="w-full flex items-center justify-between px-3 py-2 text-left text-xs font-semibold text-slate-300 hover:text-white hover:bg-white/5 transition-all cursor-pointer"
+                          onClick={() => {
+                            toggleTableExpand(tableObj.table);
+                            fetchTableExplorerData(tableObj.table);
+                          }}
+                          className={`w-full flex items-center justify-between px-3 py-2 text-left text-xs font-semibold transition-all cursor-pointer ${
+                            selectedExplorerTable === tableObj.table
+                              ? "bg-indigo-500/10 text-indigo-400 hover:bg-indigo-500/15"
+                              : "text-slate-300 hover:text-white hover:bg-white/5"
+                          }`}
                         >
                           <div className="flex items-center space-x-2 truncate">
                             <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5 text-slate-500 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -743,28 +845,69 @@ function App() {
         )}
       </main>
 
+
       {/* BOTTOM PANEL: Results Grid (Full Width) */}
-      {isConnected && activeChat && !activeChat.loading && (
+      {isConnected && (
         <section className="bg-[#0b0f19] border-t border-white/5 p-4 max-h-80 overflow-hidden flex flex-col">
-          <div className="flex items-center justify-between mb-3">
-            <div className="flex items-center space-x-2">
-              <span className="text-xs font-bold uppercase tracking-wider text-slate-400">
-                {activeChat.preview ? "Expected State Preview" : "Query Results"}
-              </span>
-              {activeChat.preview ? (
-                <span className="text-[10px] bg-violet-500/10 border border-violet-500/20 text-violet-400 rounded-full px-2 py-0.5 font-mono">
-                  Simulated state
-                </span>
-              ) : activeChat.results && (
-                <span className="text-[10px] bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 rounded-full px-2 py-0.5 font-mono">
-                  {activeChat.results.length} rows returned
-                </span>
+          {/* TAB HEADER */}
+          <div className="flex items-center justify-between mb-3 border-b border-white/5 pb-2">
+            <div className="flex items-center space-x-4">
+              <button
+                type="button"
+                onClick={() => setBottomTab("explorer")}
+                className={`text-xs font-bold uppercase tracking-wider pb-1 transition-all cursor-pointer border-b-2 ${
+                  bottomTab === "explorer"
+                    ? "text-indigo-400 border-indigo-500"
+                    : "text-slate-500 hover:text-slate-300 border-transparent"
+                }`}
+              >
+                Table Data Explorer
+              </button>
+              {activeChat && (
+                <button
+                  type="button"
+                  onClick={() => setBottomTab("results")}
+                  className={`text-xs font-bold uppercase tracking-wider pb-1 transition-all cursor-pointer border-b-2 ${
+                    bottomTab === "results"
+                      ? "text-indigo-400 border-indigo-500"
+                      : "text-slate-500 hover:text-slate-300 border-transparent"
+                  }`}
+                >
+                  Query Results
+                </button>
               )}
             </div>
 
-            {((activeChat.preview && activeChat.preview.columns && activeChat.preview.columns.length > 0) || 
-              (activeChat.results && activeChat.results.length > 0)) && (
-              <div className="flex items-center space-x-3">
+            <div className="flex items-center space-x-3">
+              {bottomTab === "explorer" && selectedExplorerTable && (
+                <div className="flex items-center space-x-2 text-xs text-slate-400 mr-2">
+                  <span className="font-semibold text-slate-300">Table: {selectedExplorerTable}</span>
+                  <span className="text-slate-600">|</span>
+                  <span className="font-mono bg-[#1e293b] border border-white/5 text-slate-300 rounded-full px-2 py-0.5 text-[10px]">
+                    {explorerTableData[selectedExplorerTable]?.rowData?.length || 0} rows loaded
+                  </span>
+                </div>
+              )}
+              {bottomTab === "results" && activeChat && (
+                <div className="flex items-center space-x-2 text-xs text-slate-400 mr-2">
+                  {activeChat.preview ? (
+                    <span className="text-[10px] bg-violet-500/10 border border-violet-500/20 text-violet-400 rounded-full px-2 py-0.5 font-mono">
+                      Simulated state
+                    </span>
+                  ) : activeChat.results && (
+                    <span className="text-[10px] bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 rounded-full px-2 py-0.5 font-mono">
+                      {activeChat.results.length} rows returned
+                    </span>
+                  )}
+                </div>
+              )}
+
+              {/* Export CSV Button */}
+              {((bottomTab === "explorer" && explorerTableData[selectedExplorerTable]?.rowData?.length > 0) ||
+                (bottomTab === "results" && activeChat && (
+                  (activeChat.preview && activeChat.preview.columns && activeChat.preview.columns.length > 0) ||
+                  (activeChat.results && activeChat.results.length > 0)
+                ))) && (
                 <button
                   onClick={exportToCSV}
                   className="flex items-center space-x-1.5 px-3 py-1 bg-emerald-600 hover:bg-emerald-500 text-xs font-bold text-white rounded-lg transition-all cursor-pointer shadow-md shadow-emerald-500/10"
@@ -774,104 +917,171 @@ function App() {
                   </svg>
                   <span>Export CSV</span>
                 </button>
-              </div>
-            )}
+              )}
+            </div>
           </div>
 
-          <div className="flex-1 overflow-auto border border-white/5 rounded-xl bg-[#0a0d1a]/50 shadow-inner">
-            {activeChat.preview ? (
-              <table className="w-full text-left border-collapse">
-                <thead>
-                  <tr className="bg-[#121929] border-b border-white/5">
-                    {activeChat.preview.columns.map(header => (
-                      <th key={header} className="p-3 text-[11px] font-bold text-slate-400 uppercase tracking-wider border-r border-white/5">
-                        {header}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {activeChat.preview.rows.map((row, rowIdx) => (
-                    <tr key={rowIdx} className="border-b border-white/5 hover:bg-white/[0.02] transition-colors">
-                      {row.map((cell, cellIdx) => (
-                        <td key={cellIdx} className="p-3 text-xs font-mono text-slate-300 border-r border-white/5 max-w-[200px] truncate" title={String(cell)}>
-                          {cell === null ? <span className="text-slate-600 italic">null</span> : String(cell)}
-                        </td>
+          {/* TAB CONTENT */}
+          {bottomTab === "explorer" ? (
+            <div className="flex-1 overflow-auto border border-white/5 rounded-xl bg-[#0a0d1a]/50 shadow-inner">
+              {loadingExplorerData ? (
+                <div className="py-8 text-center text-xs text-slate-500 flex flex-col items-center justify-center h-full">
+                  <span className="inline-block w-6 h-6 border-2 border-indigo-500/20 border-t-indigo-500 rounded-full animate-spin mb-2" />
+                  <p>Loading table data from database...</p>
+                </div>
+              ) : explorerError ? (
+                <div className="py-8 text-center text-xs text-rose-400 bg-rose-500/5 border border-rose-500/10 rounded-xl p-4 m-4">
+                  <p className="font-bold">Error loading table data:</p>
+                  <p>{explorerError}</p>
+                </div>
+              ) : !selectedExplorerTable ? (
+                <div className="py-8 text-center text-xs text-slate-500 flex items-center justify-center h-full">
+                  Select a table from the schema explorer to view its contents.
+                </div>
+              ) : !explorerTableData[selectedExplorerTable] || !explorerTableData[selectedExplorerTable].rowData || explorerTableData[selectedExplorerTable].rowData.length === 0 ? (
+                <div className="py-8 text-center text-xs text-slate-500 flex items-center justify-center h-full">
+                  No rows found in this table.
+                </div>
+              ) : (() => {
+                const tableData = explorerTableData[selectedExplorerTable];
+                const cols = getColumnNames(tableData.columnData);
+                return (
+                  <table className="w-full text-left border-collapse min-w-max">
+                    <thead>
+                      <tr className="bg-[#121929] border-b border-white/5 sticky top-0 z-10">
+                        {cols.map(header => (
+                          <th key={header} className="p-3 text-[11px] font-bold text-slate-400 uppercase tracking-wider border-r border-white/5">
+                            {header}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {tableData.rowData.map((row, rowIdx) => (
+                        <tr key={rowIdx} className="border-b border-white/5 hover:bg-white/[0.02] transition-colors">
+                          {cols.map(header => {
+                            const val = row[header];
+                            return (
+                              <td key={header} className="p-3 text-xs font-mono text-slate-300 border-r border-white/5 max-w-[300px] truncate" title={val !== null ? String(val) : ""}>
+                                {val === null ? <span className="text-slate-600 italic">null</span> : String(val)}
+                              </td>
+                            );
+                          })}
+                        </tr>
                       ))}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            ) : !activeChat.results || activeChat.results.length === 0 ? (
-              <div className="py-8 text-center text-xs text-slate-500">
-                No rows returned.
-              </div>
-            ) : (
-              <table className="w-full text-left border-collapse">
-                <thead>
-                  <tr className="bg-[#121929] border-b border-white/5">
-                    {Object.keys(activeChat.results[0]).map(header => (
-                      <th key={header} className="p-3 text-[11px] font-bold text-slate-400 uppercase tracking-wider border-r border-white/5">
-                        {header}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {paginatedResults.map((row, rowIdx) => (
-                    <tr key={rowIdx} className="border-b border-white/5 hover:bg-white/[0.02] transition-colors">
-                      {Object.keys(row).map(header => (
-                        <td key={header} className="p-3 text-xs font-mono text-slate-300 border-r border-white/5 max-w-[200px] truncate" title={String(row[header])}>
-                          {row[header] === null ? <span className="text-slate-600 italic">null</span> : String(row[header])}
-                        </td>
+                    </tbody>
+                  </table>
+                );
+              })()}
+            </div>
+          ) : (
+            /* QUERY RESULTS TAB */
+            <div className="flex-1 flex flex-col overflow-hidden">
+              <div className="flex-1 overflow-auto border border-white/5 rounded-xl bg-[#0a0d1a]/50 shadow-inner">
+                {!activeChat ? (
+                  <div className="py-8 text-center text-xs text-slate-500 flex items-center justify-center h-full">
+                    No active query results. Select a chat query response to view results.
+                  </div>
+                ) : activeChat.loading ? (
+                  <div className="py-8 text-center text-xs text-slate-500 flex flex-col items-center justify-center h-full">
+                    <span className="inline-block w-4 h-4 border-2 border-slate-700 border-t-indigo-400 rounded-full animate-spin mb-2" />
+                    <p>Generating query results...</p>
+                  </div>
+                ) : activeChat.preview ? (
+                  <table className="w-full text-left border-collapse min-w-max">
+                    <thead>
+                      <tr className="bg-[#121929] border-b border-white/5">
+                        {activeChat.preview.columns.map(header => (
+                          <th key={header} className="p-3 text-[11px] font-bold text-slate-400 uppercase tracking-wider border-r border-white/5">
+                            {header}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {activeChat.preview.rows.map((row, rowIdx) => (
+                        <tr key={rowIdx} className="border-b border-white/5 hover:bg-white/[0.02] transition-colors">
+                          {row.map((cell, cellIdx) => (
+                            <td key={cellIdx} className="p-3 text-xs font-mono text-slate-300 border-r border-white/5 max-w-[200px] truncate" title={String(cell)}>
+                              {cell === null ? <span className="text-slate-600 italic">null</span> : String(cell)}
+                            </td>
+                          ))}
+                        </tr>
                       ))}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </div>
-
-          {/* PAGINATION CONTROLS */}
-          {activeChat.results && activeChat.results.length > resultLimit && (
-            <div className="flex items-center justify-between mt-3 text-xs text-slate-400">
-              <div className="flex items-center space-x-2">
-                <span>Show</span>
-                <select
-                  value={resultLimit}
-                  onChange={e => {
-                    setResultLimit(Number(e.target.value));
-                    setResultPage(1);
-                  }}
-                  className="bg-[#070a13] border border-white/5 rounded px-2 py-0.5 text-xs outline-none"
-                >
-                  <option value={5}>5</option>
-                  <option value={10}>10</option>
-                  <option value={20}>20</option>
-                  <option value={50}>50</option>
-                </select>
-                <span>entries</span>
+                    </tbody>
+                  </table>
+                ) : !activeChat.results || activeChat.results.length === 0 ? (
+                  <div className="py-8 text-center text-xs text-slate-500 flex items-center justify-center h-full">
+                    No rows returned.
+                  </div>
+                ) : (
+                  <table className="w-full text-left border-collapse min-w-max">
+                    <thead>
+                      <tr className="bg-[#121929] border-b border-white/5">
+                        {Object.keys(activeChat.results[0]).map(header => (
+                          <th key={header} className="p-3 text-[11px] font-bold text-slate-400 uppercase tracking-wider border-r border-white/5">
+                            {header}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {paginatedResults.map((row, rowIdx) => (
+                        <tr key={rowIdx} className="border-b border-white/5 hover:bg-white/[0.02] transition-colors">
+                          {Object.keys(row).map(header => (
+                            <td key={header} className="p-3 text-xs font-mono text-slate-300 border-r border-white/5 max-w-[200px] truncate" title={String(row[header])}>
+                              {row[header] === null ? <span className="text-slate-600 italic">null</span> : String(row[header])}
+                            </td>
+                          ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
               </div>
 
-              <div className="flex items-center space-x-2">
-                <button
-                  disabled={resultPage === 1}
-                  onClick={() => setResultPage(prev => Math.max(prev - 1, 1))}
-                  className="px-2 py-1 bg-white/5 hover:bg-white/10 disabled:opacity-30 rounded transition-all cursor-pointer"
-                >
-                  Previous
-                </button>
-                <span>
-                  Page <strong className="text-slate-200">{resultPage}</strong> of <strong className="text-slate-200">{totalPages}</strong>
-                </span>
-                <button
-                  disabled={resultPage === totalPages}
-                  onClick={() => setResultPage(prev => Math.min(prev + 1, totalPages))}
-                  className="px-2 py-1 bg-white/5 hover:bg-white/10 disabled:opacity-30 rounded transition-all cursor-pointer"
-                >
-                  Next
-                </button>
-              </div>
+              {/* PAGINATION CONTROLS */}
+              {activeChat && !activeChat.loading && activeChat.results && activeChat.results.length > resultLimit && (
+                <div className="flex items-center justify-between mt-3 text-xs text-slate-400">
+                  <div className="flex items-center space-x-2">
+                    <span>Show</span>
+                    <select
+                      value={resultLimit}
+                      onChange={e => {
+                        setResultLimit(Number(e.target.value));
+                        setResultPage(1);
+                      }}
+                      className="bg-[#070a13] border border-white/5 rounded px-2 py-0.5 text-xs outline-none"
+                    >
+                      <option value={5}>5</option>
+                      <option value={10}>10</option>
+                      <option value={20}>20</option>
+                      <option value={50}>50</option>
+                    </select>
+                    <span>entries</span>
+                  </div>
+
+                  <div className="flex items-center space-x-2">
+                    <button
+                      disabled={resultPage === 1}
+                      onClick={() => setResultPage(prev => Math.max(prev - 1, 1))}
+                      className="px-2 py-1 bg-white/5 hover:bg-white/10 disabled:opacity-30 rounded transition-all cursor-pointer"
+                    >
+                      Previous
+                    </button>
+                    <span>
+                      Page <strong className="text-slate-200">{resultPage}</strong> of <strong className="text-slate-200">{totalPages}</strong>
+                    </span>
+                    <button
+                      disabled={resultPage === totalPages}
+                      onClick={() => setResultPage(prev => Math.min(prev + 1, totalPages))}
+                      className="px-2 py-1 bg-white/5 hover:bg-white/10 disabled:opacity-30 rounded transition-all cursor-pointer"
+                    >
+                      Next
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </section>
