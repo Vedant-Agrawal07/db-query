@@ -83,6 +83,60 @@ const getColumnNames = (columns) => {
   }).filter(name => name !== "");
 };
 
+// Helper to determine risk level of a query (matches backend risk labels logic)
+const getQueryRiskLabel = (query, dbType) => {
+  if (!query || typeof query !== "string") return "SAFE";
+
+  // Strip comments and string literals
+  let cleanQuery = query;
+  cleanQuery = cleanQuery.replace(/--.*$/gm, "");
+  cleanQuery = cleanQuery.replace(/\/\*[\s\S]*?\*\//g, "");
+  cleanQuery = cleanQuery.replace(/\/\/.*$/gm, "");
+  cleanQuery = cleanQuery.replace(/'[^']*'/g, "''");
+  cleanQuery = cleanQuery.replace(/"[^"]*"/g, '""');
+
+  const cleanTrimmed = cleanQuery.trim();
+  const cleanUpper = cleanTrimmed.toUpperCase();
+
+  if (dbType === "mongoDb") {
+    if (/\b(drop|dropDatabase)\b/i.test(cleanQuery)) {
+      return "HIGH_RISK";
+    }
+    if (/\b(createCollection|createIndex)\b/i.test(cleanQuery)) {
+      return "MODIFIES_SCHEMA";
+    }
+    if (/\b(insert|update|delete|remove|save|replaceOne|updateOne|updateMany|insertOne|insertMany|deleteOne|deleteMany)\b/i.test(cleanQuery)) {
+      return "MODIFIES_DATA";
+    }
+    
+    if (/\b(aggregate|lookup|group|bucket|facet)\b/i.test(cleanQuery) || !/\b(limit)\b/i.test(cleanQuery)) {
+      return "READ_ONLY";
+    }
+    return "SAFE";
+  } else {
+    // SQL Risk Check
+    if (/\b(DROP|TRUNCATE)\b/i.test(cleanUpper)) {
+      return "HIGH_RISK";
+    }
+    if (/\b(CREATE|ALTER)\b/i.test(cleanUpper)) {
+      return "MODIFIES_SCHEMA";
+    }
+    if (/\b(INSERT|UPDATE|DELETE)\b/i.test(cleanUpper)) {
+      return "MODIFIES_DATA";
+    }
+    
+    const hasJoin = /\bJOIN\b/i.test(cleanUpper);
+    const hasGroupBy = /\bGROUP\s+BY\b/i.test(cleanUpper);
+    const hasAggregates = /\b(COUNT|SUM|AVG|MIN|MAX)\b/i.test(cleanUpper);
+    const hasLimit = /\bLIMIT\b/i.test(cleanUpper);
+
+    if (hasJoin || hasGroupBy || hasAggregates || !hasLimit) {
+      return "READ_ONLY";
+    }
+    return "SAFE";
+  }
+};
+
 function App() {
   // Connection State
   const [isConnected, setIsConnected] = useState(false);
@@ -99,6 +153,10 @@ function App() {
   const [loadingExplorerData, setLoadingExplorerData] = useState(false);
   const [explorerError, setExplorerError] = useState("");
   const [bottomTab, setBottomTab] = useState("explorer"); // 'results' | 'explorer'
+
+  // Query Execution State
+  const [executing, setExecuting] = useState(false);
+  const [executionError, setExecutionError] = useState("");
 
   // Helper to extract database name from URI for visual display
   const getDbNameFromUri = (uriStr) => {
@@ -390,6 +448,65 @@ function App() {
     setExplorerTableData({});
     // Fetch schema and reload currently selected explorer table (or first table if none selected)
     await fetchSchema(threadId, dbType, selectedExplorerTable);
+  };
+
+  const handleExecuteQuery = async (queryToExecute) => {
+    if (!queryToExecute) return;
+    
+    const label = getQueryRiskLabel(queryToExecute, dbType);
+    if (label === "HIGH_RISK") {
+      alert("High risk queries cannot be executed.");
+      return;
+    }
+    
+    if (label === "MODIFIES_DATA" || label === "MODIFIES_SCHEMA") {
+      const confirmed = window.confirm(`Warning: This query modifies database ${label === "MODIFIES_DATA" ? "data" : "schema"}. Are you sure you want to execute it?`);
+      if (!confirmed) return;
+    }
+
+    setExecuting(true);
+    setExecutionError("");
+
+    try {
+      const response = await fetch(`/api/user/execute-query/${dbType}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          threadId,
+          query: queryToExecute
+        })
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.message || "Failed to execute query.");
+      }
+      setChatHistory(prev => {
+        const updated = [...prev];
+        if (selectedChatIndex >= 0) {
+          updated[selectedChatIndex] = {
+            ...updated[selectedChatIndex],
+            results: data.type === "SELECT" ? (data.results || []) : [],
+            affectedRows: data.affectedRows || 0,
+            executionMessage: data.message || "",
+            executionType: data.type,
+            executed: true,
+            preview: data.type === "SELECT" ? updated[selectedChatIndex].preview : null
+          };
+        }
+        return updated;
+      });
+      setBottomTab("results");
+      setResultPage(1);
+
+      // Refresh schema & Data Explorer so the user immediately sees changes
+      handleRefresh();
+
+    } catch (err) {
+      setExecutionError(err.message);
+      alert(`Execution Error: ${err.message}`);
+    } finally {
+      setExecuting(false);
+    }
   };
 
   // Get active chat details
@@ -797,50 +914,117 @@ function App() {
                       .replace(/<[^>]*>/g, "")
                       .replace(/\b\d{3}\s+\w+-\w+\b/g, "");
 
+                    const label = getQueryRiskLabel(cleanSQL, dbType);
+
                     return (
-                      <div className="bg-[#070a13] border border-white/5 rounded-xl overflow-hidden shadow-inner">
-                        <div className="bg-[#121929] px-3 py-2 flex items-center justify-between border-b border-white/5">
-                          <span className="text-[10px] font-mono text-slate-400 uppercase font-semibold">
-                            {dbType === "mongoDb" ? "MongoDB MQL" : "SQL Query"}
-                          </span>
-                          <button
-                            onClick={() => handleCopyToClipboard(cleanSQL, selectedChatIndex)}
-                            className="flex items-center space-x-1 px-2 py-1 text-[10px] font-semibold bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white rounded transition-all cursor-pointer"
-                          >
-                            {copiedIndex === selectedChatIndex ? (
-                              <>
-                                <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" />
-                                </svg>
-                                <span className="text-emerald-400">Copied!</span>
-                              </>
-                            ) : (
-                              <>
-                                <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
-                                </svg>
-                                <span>Copy</span>
-                              </>
-                            )}
-                          </button>
+                      <div className="space-y-3 text-left">
+                        <div className="bg-[#070a13] border border-white/5 rounded-xl overflow-hidden shadow-inner">
+                          <div className="bg-[#121929] px-3 py-2 flex items-center justify-between border-b border-white/5">
+                            <span className="text-[10px] font-mono text-slate-400 uppercase font-semibold">
+                              {dbType === "mongoDb" ? "MongoDB MQL" : "SQL Query"}
+                            </span>
+                            <button
+                              onClick={() => handleCopyToClipboard(cleanSQL, selectedChatIndex)}
+                              className="flex items-center space-x-1 px-2 py-1 text-[10px] font-semibold bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white rounded transition-all cursor-pointer"
+                            >
+                              {copiedIndex === selectedChatIndex ? (
+                                <>
+                                  <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" />
+                                  </svg>
+                                  <span className="text-emerald-400">Copied!</span>
+                                </>
+                              ) : (
+                                <>
+                                  <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+                                  </svg>
+                                  <span>Copy</span>
+                                </>
+                              )}
+                            </button>
+                          </div>
+                          <pre className="p-3 text-[11px] font-mono leading-relaxed overflow-x-auto whitespace-pre-wrap select-all max-h-48 text-left">
+                            <code>{cleanSQL}</code>
+                          </pre>
                         </div>
-                        <pre className="p-3 text-[11px] font-mono leading-relaxed overflow-x-auto whitespace-pre-wrap select-all max-h-48">
-                          <code>{cleanSQL}</code>
-                        </pre>
+
+                        {/* Risk Label */}
+                        <div className="flex items-center justify-between bg-[#111726]/40 border border-white/5 rounded-xl px-3 py-2 text-left">
+                          <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Risk Level:</span>
+                          <span className={`text-[10px] font-bold px-2.5 py-0.5 rounded border ${
+                            label === "SAFE"
+                              ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20"
+                              : label === "READ_ONLY"
+                              ? "bg-blue-500/10 text-blue-400 border-blue-500/20"
+                              : label === "MODIFIES_DATA"
+                              ? "bg-amber-500/10 text-amber-400 border-amber-500/20"
+                              : label === "MODIFIES_SCHEMA"
+                              ? "bg-orange-500/10 text-orange-400 border-orange-500/20"
+                              : "bg-rose-500/10 text-rose-400 border-rose-500/20"
+                          }`}>
+                            {label}
+                          </span>
+                        </div>
+
+                        {/* Execution Controls */}
+                        <div className="pt-1">
+                          {activeChat.executed ? (
+                            <div className="flex items-center justify-center space-x-2 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 py-3 rounded-lg text-xs font-bold uppercase tracking-wider">
+                              <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                              </svg>
+                              <span>Query Executed Successfully</span>
+                            </div>
+                          ) : executing ? (
+                            <button
+                              disabled
+                              className="w-full py-3 rounded-lg text-xs font-bold uppercase tracking-wider text-slate-400 bg-slate-800/40 border border-white/5 cursor-not-allowed flex items-center justify-center space-x-2"
+                            >
+                              <span className="w-4 h-4 border-2 border-slate-400/20 border-t-slate-400 rounded-full animate-spin" />
+                              <span>Executing Query...</span>
+                            </button>
+                          ) : label === "HIGH_RISK" ? (
+                            <button
+                              disabled
+                              className="w-full py-3 rounded-lg text-xs font-bold uppercase tracking-wider text-rose-400/80 bg-rose-500/10 border border-rose-500/20 cursor-not-allowed flex items-center justify-center space-x-2"
+                            >
+                              <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                              </svg>
+                              <span>Execution Blocked (High Risk)</span>
+                            </button>
+                          ) : (label === "MODIFIES_DATA" || label === "MODIFIES_SCHEMA") ? (
+                            <button
+                              onClick={() => handleExecuteQuery(cleanSQL)}
+                              disabled={executing}
+                              className={`w-full py-3 rounded-lg text-xs font-bold uppercase tracking-wider text-white transition-all shadow-lg hover:shadow-indigo-500/10 cursor-pointer ${
+                                dbType === "mySql"
+                                  ? "bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-600 hover:to-blue-700"
+                                  : dbType === "postgres"
+                                  ? "bg-gradient-to-r from-indigo-500 to-violet-600 hover:from-indigo-600 hover:to-violet-700"
+                                  : "bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-600 hover:to-teal-700"
+                              }`}
+                            >
+                              Execute Query
+                            </button>
+                          ) : null}
+                        </div>
+
                       </div>
                     );
                   })()}
 
                   {/* EXPLANATION */}
-                  <div className="space-y-1 flex-1">
+                  <div className="space-y-1 flex-1 text-left">
                     <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">AI Explanation</span>
-                    <p className="text-xs text-slate-300 leading-relaxed bg-[#111726]/40 border border-white/5 rounded-xl p-3">
+                    <p className="text-xs text-slate-300 leading-relaxed bg-[#111726]/40 border border-white/5 rounded-xl p-3 text-left">
                       {activeChat.explanation}
                     </p>
                   </div>
                 </div>
               )}
-            </section>
+             </section>
           </div>
         )}
       </main>
@@ -1010,6 +1194,14 @@ function App() {
                       ))}
                     </tbody>
                   </table>
+                ) : activeChat.executionMessage ? (
+                  <div className="py-8 text-center text-xs text-indigo-400 font-mono flex flex-col items-center justify-center h-full">
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-8 w-8 text-emerald-400 mb-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                    <p className="text-slate-200 text-sm font-semibold mb-1">Execution Successful</p>
+                    <p className="text-slate-400">{activeChat.executionMessage}</p>
+                  </div>
                 ) : !activeChat.results || activeChat.results.length === 0 ? (
                   <div className="py-8 text-center text-xs text-slate-500 flex items-center justify-center h-full">
                     No rows returned.

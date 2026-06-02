@@ -236,4 +236,188 @@ const getSchema = expressAsyncHandler(async (req, res) => {
   }
 });
 
-export { askAi, getSchema };
+/**
+ * Helper to determine risk level of a query.
+ */
+const getQueryRiskLabel = (query, dbType) => {
+  if (!query || typeof query !== "string") return "SAFE";
+
+  // Strip comments and string literals (same regex as safetyValidator)
+  let cleanQuery = query;
+  cleanQuery = cleanQuery.replace(/--.*$/gm, "");
+  cleanQuery = cleanQuery.replace(/\/\*[\s\S]*?\*\//g, "");
+  cleanQuery = cleanQuery.replace(/\/\/.*$/gm, "");
+  cleanQuery = cleanQuery.replace(/'[^']*'/g, "''");
+  cleanQuery = cleanQuery.replace(/"[^"]*"/g, '""');
+
+  const cleanTrimmed = cleanQuery.trim();
+  const cleanUpper = cleanTrimmed.toUpperCase();
+
+  if (dbType === "mongoDb") {
+    if (/\b(drop|dropDatabase)\b/i.test(cleanQuery)) {
+      return "HIGH_RISK";
+    }
+    if (/\b(createCollection|createIndex)\b/i.test(cleanQuery)) {
+      return "MODIFIES_SCHEMA";
+    }
+    if (/\b(insert|update|delete|remove|save|replaceOne|updateOne|updateMany|insertOne|insertMany|deleteOne|deleteMany)\b/i.test(cleanQuery)) {
+      return "MODIFIES_DATA";
+    }
+    
+    if (/\b(aggregate|lookup|group|bucket|facet)\b/i.test(cleanQuery) || !/\b(limit)\b/i.test(cleanQuery)) {
+      return "READ_ONLY";
+    }
+    return "SAFE";
+  } else {
+    // SQL Risk Check
+    if (/\b(DROP|TRUNCATE)\b/i.test(cleanUpper)) {
+      return "HIGH_RISK";
+    }
+    if (/\b(CREATE|ALTER)\b/i.test(cleanUpper)) {
+      return "MODIFIES_SCHEMA";
+    }
+    if (/\b(INSERT|UPDATE|DELETE)\b/i.test(cleanUpper)) {
+      return "MODIFIES_DATA";
+    }
+    
+    const hasJoin = /\bJOIN\b/i.test(cleanUpper);
+    const hasGroupBy = /\bGROUP\s+BY\b/i.test(cleanUpper);
+    const hasAggregates = /\b(COUNT|SUM|AVG|MIN|MAX)\b/i.test(cleanUpper);
+    const hasLimit = /\bLIMIT\b/i.test(cleanUpper);
+
+    if (hasJoin || hasGroupBy || hasAggregates || !hasLimit) {
+      return "READ_ONLY";
+    }
+    return "SAFE";
+  }
+};
+
+/**
+ * Endpoint to safely execute query after frontend approval and backend validation.
+ */
+const executeQuery = expressAsyncHandler(async (req, res) => {
+  const { threadId, query } = req.body;
+  const { db } = req.params; // 'mySql', 'postgres', 'mongoDb'
+
+  if (!threadId) {
+    res.status(400).json({ message: "threadId is required." });
+    return;
+  }
+  if (!query) {
+    res.status(400).json({ message: "Query is required." });
+    return;
+  }
+
+  const connection = userPool.get(threadId);
+  if (!connection) {
+    res.status(404).json({ message: "Active database connection not found." });
+    return;
+  }
+
+  // 1. Validate the query again (Risk check + safetyValidator table/column existence check)
+  const risk = getQueryRiskLabel(query, db);
+  if (risk === "HIGH_RISK") {
+    res.status(400).json({ message: "Validation failed: High risk queries are blocked from execution." });
+    return;
+  }
+
+  try {
+    const fullSchema = await fetchFullSchema(connection, db);
+    const validation = validateQuery(query, db, fullSchema);
+    
+    // Check if safety validator returned an error about non-existent table/column
+    if (validation.warning === "⚠ This query will not be executed, but you can review or edit it.") {
+      res.status(400).json({ message: "Validation failed: The query contains invalid tables or columns." });
+      return;
+    }
+
+    // 2. Execute the query
+    let queryResults = [];
+    let affectedRows = 0;
+    let queryType = "SELECT";
+    let message = "Executed successfully.";
+
+    const isMongo = db === "mongoDb";
+    
+    if (isMongo) {
+      const lowerQuery = query.toLowerCase();
+      if (lowerQuery.includes(".insert") || lowerQuery.includes(".save")) {
+        queryType = "INSERT";
+      } else if (lowerQuery.includes(".update") || lowerQuery.includes(".replace")) {
+        queryType = "UPDATE";
+      } else if (lowerQuery.includes(".delete") || lowerQuery.includes(".remove")) {
+        queryType = "DELETE";
+      } else if (lowerQuery.includes(".create")) {
+        queryType = "CREATE";
+      }
+
+      const rawResult = await executeMongoQuery(connection, query);
+      if (rawResult) {
+        if (queryType === "INSERT") {
+          affectedRows = rawResult.insertedCount || (rawResult.insertedId ? 1 : 0) || 0;
+          message = `${affectedRows} document(s) inserted.`;
+        } else if (queryType === "UPDATE") {
+          affectedRows = rawResult.modifiedCount || rawResult.matchedCount || 0;
+          message = `${affectedRows} document(s) updated.`;
+        } else if (queryType === "DELETE") {
+          affectedRows = rawResult.deletedCount || 0;
+          message = `${affectedRows} document(s) deleted.`;
+        } else if (queryType === "CREATE") {
+          message = "Collection created successfully.";
+        } else {
+          queryResults = Array.isArray(rawResult) ? rawResult : [rawResult];
+        }
+      }
+    } else {
+      const firstWordMatch = query.trim().match(/^[a-zA-Z_]+/);
+      const firstWord = firstWordMatch ? firstWordMatch[0].toUpperCase() : "";
+      
+      if (firstWord === "INSERT") {
+        queryType = "INSERT";
+      } else if (firstWord === "UPDATE") {
+        queryType = "UPDATE";
+      } else if (firstWord === "DELETE") {
+        queryType = "DELETE";
+      } else if (firstWord === "CREATE" || firstWord === "ALTER") {
+        queryType = "SCHEMA";
+      }
+
+      if (db === "mySql") {
+        const [result] = await connection.query(query);
+        if (queryType === "SELECT" || Array.isArray(result)) {
+          queryResults = result;
+          queryType = "SELECT";
+        } else {
+          affectedRows = result.affectedRows || 0;
+          message = `Query executed. ${affectedRows} row(s) affected.`;
+        }
+      } else {
+        // postgres
+        const result = await connection.query(query);
+        if (queryType === "SELECT" || result.command === "SELECT" || (Array.isArray(result.rows) && result.command === "SELECT")) {
+          queryResults = result.rows;
+          queryType = "SELECT";
+        } else {
+          affectedRows = result.rowCount || 0;
+          message = `Query executed. ${affectedRows} row(s) affected.`;
+          if (queryType === "SCHEMA") {
+            message = `${result.command} executed successfully.`;
+          }
+        }
+      }
+    }
+
+    res.status(200).json({
+      success: true,
+      type: queryType,
+      results: queryResults,
+      affectedRows,
+      message
+    });
+
+  } catch (err) {
+    res.status(400).json({ message: `Execution failed: ${err.message}` });
+  }
+});
+
+export { askAi, getSchema, executeQuery };

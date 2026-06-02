@@ -80,46 +80,64 @@ export const validateQuery = (query, dbType, fullSchema) => {
     });
 
     if (dbType !== "mongoDb") {
-      // Parse referenced table names in SQL (following FROM or JOIN)
-      const tableRegex = /(?:from|join)\s+[\`"]?([a-zA-Z0-9_]+)[\`"]?/gi;
-      let match;
+      const words = cleanQuery.match(/\b[a-zA-Z0-9_]+\b/g) || [];
       const referencedTables = new Set();
-      while ((match = tableRegex.exec(cleanQuery)) !== null) {
-        referencedTables.add(match[1].toLowerCase());
-      }
-
-      // Check referenced tables against schema
-      for (const tableName of referencedTables) {
-        if (!allTableNames.includes(tableName)) {
-          return {
-            isValid: true,
-            executable: false,
-            warning: "⚠ This query will not be executed, but you can review or edit it."
-          };
-        }
-      }
-
-      // Map table aliases (e.g. "users AS u" or "users u")
       const aliasMap = {};
-      const aliasRegex = /(?:from|join)\s+[\`"]?([a-zA-Z0-9_]+)[\`"]?(?:\s+as)?\s+([a-zA-Z0-9_]+)/gi;
-      let aliasMatch;
-      while ((aliasMatch = aliasRegex.exec(cleanQuery)) !== null) {
-        const tableName = aliasMatch[1].toLowerCase();
-        const aliasName = aliasMatch[2].toLowerCase();
-        const sqlKeywords = new Set(["on", "where", "group", "order", "limit", "using", "as", "inner", "left", "right", "and", "or"]);
-        if (allTableNames.includes(tableName) && !sqlKeywords.has(aliasName)) {
-          aliasMap[aliasName] = tableName;
+      const definedAliases = new Set();
+
+      const sqlKeywords = new Set([
+        "select", "from", "join", "on", "where", "group", "by", "order", "having", "limit", 
+        "offset", "union", "as", "inner", "left", "right", "outer", "cross", "natural", 
+        "using", "and", "or", "not", "in", "is", "null", "case", "when", "then", "else", 
+        "end", "count", "sum", "avg", "min", "max", "coalesce", "concat", "substring", 
+        "length", "now", "curdate", "year", "month", "day", "true", "false", "exists", 
+        "between", "any", "all", "some"
+      ]);
+
+      // Parse referenced tables and their aliases
+      for (let i = 0; i < words.length; i++) {
+        const word = words[i].toLowerCase();
+        if (word === "from" || word === "join") {
+          if (i + 1 < words.length) {
+            const tableName = words[i + 1].toLowerCase();
+            // If the table name is not in the schema, and is not a SQL keyword (which indicates a subquery or syntax), block it.
+            if (!allTableNames.includes(tableName)) {
+              if (!sqlKeywords.has(tableName)) {
+                return {
+                  isValid: true,
+                  executable: false,
+                  warning: "⚠ This query will not be executed, but you can review or edit it."
+                };
+              }
+            } else {
+              referencedTables.add(tableName);
+              
+              if (i + 2 < words.length) {
+                const nextWord = words[i + 2].toLowerCase();
+                if (nextWord === "as") {
+                  if (i + 3 < words.length) {
+                    const aliasName = words[i + 3].toLowerCase();
+                    if (!sqlKeywords.has(aliasName)) {
+                      aliasMap[aliasName] = tableName;
+                    }
+                  }
+                } else if (!sqlKeywords.has(nextWord) && !allTableNames.includes(nextWord)) {
+                  aliasMap[nextWord] = tableName;
+                }
+              }
+            }
+          }
+        } else if (word === "as" && i + 1 < words.length) {
+          definedAliases.add(words[i + 1].toLowerCase());
         }
       }
 
       // Verify dot-notation column references (e.g., "u.id" or "users.id")
       const dotRegex = /\b([a-zA-Z0-9_]+)\.([a-zA-Z0-9_]+)\b/g;
       let dotMatch;
-      const verifiedDotColumns = new Set();
       while ((dotMatch = dotRegex.exec(cleanQuery)) !== null) {
         const qualifier = dotMatch[1].toLowerCase();
         const colName = dotMatch[2].toLowerCase();
-        verifiedDotColumns.add(colName);
 
         const resolvedTable = aliasMap[qualifier] || (allTableNames.includes(qualifier) ? qualifier : null);
         if (resolvedTable) {
@@ -136,15 +154,6 @@ export const validateQuery = (query, dbType, fullSchema) => {
 
       // Check other referenced columns (without table prefixes)
       const queryWords = cleanQuery.match(/\b[a-zA-Z_][a-zA-Z0-9_]*\b/g) || [];
-      const sqlKeywords = new Set([
-        "select", "from", "where", "join", "on", "and", "or", "not", "in", "is", "null",
-        "as", "group", "by", "order", "having", "limit", "offset", "like", "inner",
-        "left", "right", "outer", "cross", "natural", "using", "with", "case", "when",
-        "then", "else", "end", "count", "sum", "avg", "min", "max", "coalesce", "concat",
-        "substring", "length", "now", "curdate", "year", "month", "day", "true", "false",
-        "exists", "between", "any", "all", "some", "union"
-      ]);
-
       const activeTables = referencedTables.size > 0 ? Array.from(referencedTables) : allTableNames;
       const allowedColumns = new Set();
       activeTables.forEach(t => {
@@ -157,24 +166,13 @@ export const validateQuery = (query, dbType, fullSchema) => {
       for (const word of queryWords) {
         const lowerWord = word.toLowerCase();
         // If it's a known column in the database schema but is not allowed on the referenced tables
-        if (!sqlKeywords.has(lowerWord) && !allTableNames.includes(lowerWord) && !aliasMap[lowerWord]) {
+        if (!sqlKeywords.has(lowerWord) && !allTableNames.includes(lowerWord) && !aliasMap[lowerWord] && !definedAliases.has(lowerWord)) {
           if (allColumnNames.has(lowerWord) && !allowedColumns.has(lowerWord)) {
             return {
               isValid: true,
               executable: false,
               warning: "⚠ This query will not be executed, but you can review or edit it."
             };
-          }
-          // If the column name does not exist in the database schema at all, and is not a dot-notation column we already verified
-          if (!allColumnNames.has(lowerWord) && !verifiedDotColumns.has(lowerWord) && !sqlKeywords.has(lowerWord)) {
-            const commonFunctions = new Set(["concat", "length", "now", "coalesce"]);
-            if (!commonFunctions.has(lowerWord) && lowerWord.length > 2) {
-              return {
-                isValid: true,
-                executable: false,
-                warning: "⚠ This query will not be executed, but you can review or edit it."
-              };
-            }
           }
         }
       }
