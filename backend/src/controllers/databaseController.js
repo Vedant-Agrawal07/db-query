@@ -1,12 +1,15 @@
 import expressAsyncHandler from "express-async-handler";
+import crypto from "crypto";
+import userPool from "../config/poolStore.js";
+import { fetchFullSchema } from "../services/databaseService.js";
+
 import {
   initalConnect,
   dbPool,
   fetchTableData,
   scanDb,
   scanTables,
-} from "../db/mysqlConnector.js";
-import userPool from "../poolStore.js";
+} from "../database/mysql.js";
 
 import {
   initalConnectMongo,
@@ -14,7 +17,7 @@ import {
   fetchCollectionData,
   scanDbMongo,
   scanCollections,
-} from "../db/mongoDbConnector.js";
+} from "../database/mongo.js";
 
 import {
   initialConnectPostgres,
@@ -22,9 +25,7 @@ import {
   fetchTableDataPostgres,
   scanDbPostgres,
   scanTablesPostgres,
-} from "../db/postgresConnector.js";
-
-import crypto from "crypto";
+} from "../database/postgres.js";
 
 const handshake = expressAsyncHandler(async (req, res) => {
   const { dbType, connectionString } = req.body;
@@ -191,6 +192,7 @@ const databaseScan = expressAsyncHandler(async (req, res) => {
     }
   }
 });
+
 const tableScan = expressAsyncHandler(async (req, res) => {
   const { threadId } = req.body;
   const { db } = req.params;
@@ -221,4 +223,30 @@ const tableScan = expressAsyncHandler(async (req, res) => {
   }
 });
 
-export { handshake, connectDb, tableInfo, databaseScan, tableScan };
+/**
+ * Helper to fetch database schema for the Left Explorer Tree
+ */
+const getSchema = expressAsyncHandler(async (req, res) => {
+  const { threadId } = req.body;
+  const { db } = req.params;
+
+  if (!threadId) {
+    res.status(400).json({ message: "threadId is required." });
+    return;
+  }
+
+  const connection = userPool.get(threadId);
+  if (!connection) {
+    res.status(404).json({ message: "Active database connection not found." });
+    return;
+  }
+
+  try {
+    const schema = await fetchFullSchema(connection, db);
+    res.status(200).json({ schema });
+  } catch (error) {
+    res.status(500).json({ message: "Failed to fetch database schema", error: error.message });
+  }
+});
+
+export { handshake, connectDb, tableInfo, databaseScan, tableScan, getSchema };

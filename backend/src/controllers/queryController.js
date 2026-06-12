@@ -1,108 +1,12 @@
 import expressAsyncHandler from "express-async-handler";
-import userPool from "../poolStore.js";
-import { filterSchema } from "../services/schemaFilter.js";
-import { buildPrompt } from "../services/promptBuilder.js";
-import { generateQuery } from "../services/geminiService.js";
-import { validateQuery } from "../services/safetyValidator.js";
-
-/**
- * Helper to fetch tables and their columns in a single run.
- */
-const fetchFullSchema = async (connection, dbType) => {
-  if (dbType === "mySql") {
-    const [rows] = await connection.query(`
-      SELECT TABLE_NAME as tableName, COLUMN_NAME as columnName
-      FROM information_schema.COLUMNS
-      WHERE TABLE_SCHEMA = DATABASE()
-    `);
-    const schemaMap = {};
-    rows.forEach(r => {
-      const table = r.tableName;
-      const col = r.columnName;
-      if (!schemaMap[table]) schemaMap[table] = [];
-      schemaMap[table].push(col);
-    });
-    return Object.keys(schemaMap).map(table => ({
-      table,
-      columns: schemaMap[table]
-    }));
-  } else if (dbType === "postgres" || dbType === "postgreSql") {
-    const { rows } = await connection.query(`
-      SELECT table_name as "tableName", column_name as "columnName"
-      FROM information_schema.columns
-      WHERE table_schema = 'public'
-    `);
-    const schemaMap = {};
-    rows.forEach(r => {
-      const table = r.tableName;
-      const col = r.columnName;
-      if (!schemaMap[table]) schemaMap[table] = [];
-      schemaMap[table].push(col);
-    });
-    return Object.keys(schemaMap).map(table => ({
-      table,
-      columns: schemaMap[table]
-    }));
-  } else if (dbType === "mongoDb") {
-    const collections = await connection.listCollections().toArray();
-    const schema = [];
-    for (const col of collections) {
-      const colName = col.name;
-      // Fetch a sample document to discover fields
-      const doc = await connection.collection(colName).findOne();
-      const columns = doc ? Object.keys(doc) : [];
-      schema.push({ table: colName, columns });
-    }
-    return schema;
-  }
-  return [];
-};
-
-/**
- * Execute MongoDB queries represented as strings.
- * Expected format: db.collectionName.find({...}) or db.collectionName.aggregate([...])
- */
-const executeMongoQuery = async (connection, queryStr) => {
-  const mongoRegex = /db\.([a-zA-Z0-9_]+)\.([a-zA-Z0-9_]+)\(([\s\S]*)\)/;
-  const match = queryStr.match(mongoRegex);
-  if (!match) {
-    throw new Error("Invalid MongoDB query format. Expected: db.collectionName.method(...)");
-  }
-
-  const collectionName = match[1];
-  const method = match[2];
-  const argsStr = match[3].trim();
-
-  const collection = connection.collection(collectionName);
-
-  if (typeof collection[method] !== "function") {
-    throw new Error(`MongoDB collection does not support method "${method}"`);
-  }
-
-  let args = [];
-  if (argsStr) {
-    try {
-      // Evaluate relaxed JSON/JS objects safely
-      args = new Function(`return [${argsStr}]`)();
-    } catch (e) {
-      try {
-        args = [JSON.parse(argsStr)];
-      } catch (err) {
-        throw new Error("Failed to parse MongoDB query arguments: " + e.message);
-      }
-    }
-  }
-
-  const cursor = collection[method](...args);
-
-  if (cursor && typeof cursor.toArray === "function") {
-    return await cursor.toArray();
-  } else if (cursor && typeof cursor.then === "function") {
-    return await cursor;
-  } else {
-    return cursor;
-  }
-};
+import userPool from "../config/poolStore.js";
+import { filterSchema } from "../utils/schemaFilter.js";
+import { buildPrompt } from "../services/gemini/promptBuilder.js";
+import { generateQuery } from "../services/gemini/geminiService.js";
+import { validateQuery } from "../validators/safetyValidator.js";
+import { fetchFullSchema } from "../services/databaseService.js";
+import { executeMongoQuery } from "../services/query/queryExecutor.js";
+import { getQueryRiskLabel } from "../services/query/riskClassifier.js";
 
 /**
  * Endpoint for /api/user/ask-ai/:db
@@ -209,88 +113,6 @@ const askAi = expressAsyncHandler(async (req, res) => {
     });
   }
 });
-
-/**
- * Helper to fetch database schema for the Left Explorer Tree
- */
-const getSchema = expressAsyncHandler(async (req, res) => {
-  const { threadId } = req.body;
-  const { db } = req.params;
-
-  if (!threadId) {
-    res.status(400).json({ message: "threadId is required." });
-    return;
-  }
-
-  const connection = userPool.get(threadId);
-  if (!connection) {
-    res.status(404).json({ message: "Active database connection not found." });
-    return;
-  }
-
-  try {
-    const schema = await fetchFullSchema(connection, db);
-    res.status(200).json({ schema });
-  } catch (error) {
-    res.status(500).json({ message: "Failed to fetch database schema", error: error.message });
-  }
-});
-
-/**
- * Helper to determine risk level of a query.
- */
-const getQueryRiskLabel = (query, dbType) => {
-  if (!query || typeof query !== "string") return "SAFE";
-
-  // Strip comments and string literals (same regex as safetyValidator)
-  let cleanQuery = query;
-  cleanQuery = cleanQuery.replace(/--.*$/gm, "");
-  cleanQuery = cleanQuery.replace(/\/\*[\s\S]*?\*\//g, "");
-  cleanQuery = cleanQuery.replace(/\/\/.*$/gm, "");
-  cleanQuery = cleanQuery.replace(/'[^']*'/g, "''");
-  cleanQuery = cleanQuery.replace(/"[^"]*"/g, '""');
-
-  const cleanTrimmed = cleanQuery.trim();
-  const cleanUpper = cleanTrimmed.toUpperCase();
-
-  if (dbType === "mongoDb") {
-    if (/\b(drop|dropDatabase)\b/i.test(cleanQuery)) {
-      return "HIGH_RISK";
-    }
-    if (/\b(createCollection|createIndex)\b/i.test(cleanQuery)) {
-      return "MODIFIES_SCHEMA";
-    }
-    if (/\b(insert|update|delete|remove|save|replaceOne|updateOne|updateMany|insertOne|insertMany|deleteOne|deleteMany)\b/i.test(cleanQuery)) {
-      return "MODIFIES_DATA";
-    }
-    
-    if (/\b(aggregate|lookup|group|bucket|facet)\b/i.test(cleanQuery) || !/\b(limit)\b/i.test(cleanQuery)) {
-      return "READ_ONLY";
-    }
-    return "SAFE";
-  } else {
-    // SQL Risk Check
-    if (/\b(DROP|TRUNCATE)\b/i.test(cleanUpper)) {
-      return "HIGH_RISK";
-    }
-    if (/\b(CREATE|ALTER)\b/i.test(cleanUpper)) {
-      return "MODIFIES_SCHEMA";
-    }
-    if (/\b(INSERT|UPDATE|DELETE)\b/i.test(cleanUpper)) {
-      return "MODIFIES_DATA";
-    }
-    
-    const hasJoin = /\bJOIN\b/i.test(cleanUpper);
-    const hasGroupBy = /\bGROUP\s+BY\b/i.test(cleanUpper);
-    const hasAggregates = /\b(COUNT|SUM|AVG|MIN|MAX)\b/i.test(cleanUpper);
-    const hasLimit = /\bLIMIT\b/i.test(cleanUpper);
-
-    if (hasJoin || hasGroupBy || hasAggregates || !hasLimit) {
-      return "READ_ONLY";
-    }
-    return "SAFE";
-  }
-};
 
 /**
  * Endpoint to safely execute query after frontend approval and backend validation.
@@ -420,4 +242,4 @@ const executeQuery = expressAsyncHandler(async (req, res) => {
   }
 });
 
-export { askAi, getSchema, executeQuery };
+export { askAi, executeQuery };

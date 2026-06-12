@@ -5,8 +5,9 @@ import {
   tableInfo,
   databaseScan,
   tableScan,
-} from "../controllers/userControllers.js";
-import { askAi, getSchema, executeQuery } from "../controllers/queryController.js";
+  getSchema,
+} from "../controllers/databaseController.js";
+import { askAi, executeQuery } from "../controllers/queryController.js";
 
 const router = express.Router();
 
@@ -20,4 +21,3 @@ router.post("/schema/:db", getSchema);
 router.post("/execute-query/:db", executeQuery);
 
 export default router;
-
