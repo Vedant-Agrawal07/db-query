@@ -1,4 +1,5 @@
 import React from "react";
+import { MessageSquare, Send } from "lucide-react";
 
 function ChatPanel({
   chatHistory,
@@ -18,9 +19,7 @@ function ChatPanel({
         {chatHistory.length === 0 ? (
           <div className="h-full flex flex-col items-center justify-center p-6 text-center">
             <div className="w-16 h-16 rounded-2xl bg-[#D4EFD9] flex items-center justify-center mb-4">
-              <svg xmlns="http://www.w3.org/2000/svg" className="h-8 w-8 text-[#4A7C59] animate-pulse" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" />
-              </svg>
+              <MessageSquare className="h-8 w-8 text-[#4A7C59] animate-pulse" />
             </div>
             <h3 className="text-lg font-bold text-[#252420] mb-1">AI SQL Copilot Active</h3>
             <p className="text-sm text-[#9B9589] max-w-sm mb-6 leading-relaxed">
@@ -106,9 +105,7 @@ function ChatPanel({
             disabled={generating || !question.trim()}
             className="absolute right-2.5 top-2.5 p-2 bg-[#4A7C59] hover:bg-[#3d664a] disabled:bg-[#DDD9D2] disabled:text-[#9B9589] rounded-lg text-white transition-all cursor-pointer"
           >
-            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M14 5l7 7m0 0l-7 7m7-7H3" />
-            </svg>
+            <Send className="h-5 w-5" />
           </button>
         </div>
       </form>

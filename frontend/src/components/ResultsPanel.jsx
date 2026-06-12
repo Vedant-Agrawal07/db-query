@@ -1,4 +1,5 @@
 import React from "react";
+import { Download, CheckCircle } from "lucide-react";
 
 function ResultsPanel({
   bottomTab,
@@ -90,20 +91,7 @@ function ResultsPanel({
               onClick={exportToCSV}
               className="flex items-center space-x-1.5 px-3 py-1.5 bg-[#4A7C59] hover:bg-[#3d664a] text-xs font-bold text-white rounded-lg transition-all cursor-pointer shadow-sm"
             >
-              <svg
-                xmlns="http://www.w3.org/2000/svg"
-                className="h-4 w-4"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"
-                />
-              </svg>
+              <Download className="h-4 w-4" />
               <span>Export CSV</span>
             </button>
           )}
@@ -236,20 +224,7 @@ function ResultsPanel({
               </table>
             ) : activeChat.executionMessage ? (
               <div className="py-8 text-center text-sm text-[#252420] font-mono flex flex-col items-center justify-center h-full bg-green-50/50">
-                <svg
-                  xmlns="http://www.w3.org/2000/svg"
-                  className="h-10 w-10 text-[#4A7C59] mb-3"
-                  fill="none"
-                  viewBox="0 0 24 24"
-                  stroke="currentColor"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
-                  />
-                </svg>
+                <CheckCircle className="h-10 w-10 text-[#4A7C59] mb-3" />
                 <p className="text-[#252420] font-bold mb-1 text-base">
                   Execution Successful
                 </p>

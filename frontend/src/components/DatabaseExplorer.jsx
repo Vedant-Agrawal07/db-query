@@ -1,4 +1,5 @@
 import React from "react";
+import { RefreshCw, Table, ChevronRight } from "lucide-react";
 
 function DatabaseExplorer({
   loadingSchema,
@@ -20,9 +21,7 @@ function DatabaseExplorer({
           className="p-1 hover:bg-[#F5F4F0] rounded text-[#9B9589] hover:text-[#252420] transition-all cursor-pointer"
           title="Reload Schema and Table Data"
         >
-          <svg xmlns="http://www.w3.org/2000/svg" className={`h-4 w-4 ${loadingSchema || loadingExplorerData ? "animate-spin text-[#4A7C59]" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.21 7.89H17.64" />
-          </svg>
+          <RefreshCw className={`h-4 w-4 ${loadingSchema || loadingExplorerData ? "animate-spin text-[#4A7C59]" : ""}`} />
         </button>
       </div>
 
@@ -52,14 +51,10 @@ function DatabaseExplorer({
                   }`}
                 >
                   <div className="flex items-center space-x-2 truncate">
-                    <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 flex-shrink-0 opacity-70" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h18M3 14h18m-9-4v8m-7 0h14a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                    </svg>
+                    <Table className="h-4 w-4 flex-shrink-0 opacity-70" />
                     <span className="truncate">{tableObj.table}</span>
                   </div>
-                  <svg xmlns="http://www.w3.org/2000/svg" className={`h-3.5 w-3.5 transition-transform opacity-70 ${isExpanded ? "transform rotate-90" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                  </svg>
+                  <ChevronRight className={`h-3.5 w-3.5 transition-transform opacity-70 ${isExpanded ? "transform rotate-90" : ""}`} />
                 </button>
 
                 {/* Column List */}
